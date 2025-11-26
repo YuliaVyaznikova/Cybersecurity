@@ -1,0 +1,18 @@
+.\kuznyechik.exe genkey key.bin
+
+.\kuznyechik.exe enc key.bin empty.txt empty.enc
+.\kuznyechik.exe dec key.bin empty.enc empty.dec
+.\kuznyechik.exe hex empty.txt
+.\kuznyechik.exe hex empty.enc
+.\kuznyechik.exe hex empty.dec
+
+.\kuznyechik.exe enc key.bin small.txt small.enc
+.\kuznyechik.exe dec key.bin small.enc small.dec
+.\kuznyechik.exe hex small.txt
+.\kuznyechik.exe hex small.enc
+.\kuznyechik.exe hex small.dec
+
+.\kuznyechik.exe enc key.bin large.txt large.enc
+.\kuznyechik.exe dec key.bin large.enc large.dec
+Get-FileHash .\large.txt -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+Get-FileHash .\large.dec -Algorithm SHA256 | Select-Object -ExpandProperty Hash
