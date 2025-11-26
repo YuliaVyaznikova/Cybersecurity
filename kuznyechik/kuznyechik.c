@@ -460,7 +460,8 @@ static int dec_ctr(const char *key_path, const char *in_path, const char *out_pa
         return 1;
     }
 
-    chunk round_keys[10] = {};
+    chunk round_keys[10] = {0};
+
     gen_round_keys(key, round_keys);
 
     FILE *fi = fopen(in_path, "rb");
@@ -523,7 +524,7 @@ static int dec_ctr(const char *key_path, const char *in_path, const char *out_pa
     uint8_t inbuf[65536];
     uint8_t keystream[16];
     size_t r;
-    while (remaining > 0) {
+    do {
         size_t to_read = sizeof inbuf;
         if ((long)to_read > remaining) {
             to_read = (size_t)remaining;
@@ -547,7 +548,7 @@ static int dec_ctr(const char *key_path, const char *in_path, const char *out_pa
             return ERR_WRITE_BODY;
         }
         remaining -= (long)r;
-    }
+    } while (remaining > 0);
 
     uint8_t tag_file[32];
     if (fread(tag_file, 1, 32, fi) != 32) {
