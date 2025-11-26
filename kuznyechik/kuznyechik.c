@@ -39,6 +39,82 @@ typedef uint64_t chunk[2];
 #define ERR_HEX_OPEN 12
 #define ERR_BAD_ARG 100
 #define ERR_PATH_LEN 101
+#define ERR_AUTH 102
+#define ERR_FILE_SMALL 103
+
+static inline uint64_t rol64(uint64_t x, int n) { return (x << n) | (x >> (64 - n)); }
+
+static void keccak_f1600(uint8_t *s) {
+    uint64_t A[5][5];
+    for (int x = 0; x < 5; x++) {
+        for (int y = 0; y < 5; y++) {
+            uint64_t v = 0;
+            for (int z = 0; z < 8; z++) {
+                v |= ((uint64_t)s[(y * 5 + x) * 8 + z]) << (8 * z);
+            }
+            A[x][y] = v;
+        }
+    }
+    static const uint64_t RC[24] = {
+        0x0000000000000001ULL, 0x0000000000008082ULL,
+        0x800000000000808aULL, 0x8000000080008000ULL,
+        0x000000000000808bULL, 0x0000000080000001ULL,
+        0x8000000080008081ULL, 0x8000000000008009ULL,
+        0x000000000000008aULL, 0x0000000000000088ULL,
+        0x0000000080008009ULL, 0x000000008000000aULL,
+        0x000000008000808bULL, 0x800000000000008bULL,
+        0x8000000000008089ULL, 0x8000000000008003ULL,
+        0x8000000000008002ULL, 0x8000000000000080ULL,
+        0x000000000000800aULL, 0x800000008000000aULL,
+        0x8000000080008081ULL, 0x8000000000008080ULL,
+        0x0000000080000001ULL, 0x8000000080008008ULL
+    };
+    static const int r[5][5] = {
+        {0,36,3,41,18}, {1,44,10,45,2}, {62,6,43,15,61}, {28,55,25,21,56}, {27,20,39,8,14}
+    };
+    for (int round = 0; round < 24; round++) {
+        uint64_t C[5], D[5];
+        for (int x = 0; x < 5; x++) { C[x] = A[x][0] ^ A[x][1] ^ A[x][2] ^ A[x][3] ^ A[x][4]; }
+        for (int x = 0; x < 5; x++) { D[x] = C[(x + 4) % 5] ^ rol64(C[(x + 1) % 5], 1); }
+        for (int x = 0; x < 5; x++) { for (int y = 0; y < 5; y++) { A[x][y] ^= D[x]; } }
+        uint64_t B[5][5];
+        for (int x = 0; x < 5; x++) { for (int y = 0; y < 5; y++) { B[y][(2 * x + 3 * y) % 5] = rol64(A[x][y], r[x][y]); } }
+        for (int x = 0; x < 5; x++) { for (int y = 0; y < 5; y++) { A[x][y] = B[x][y] ^ ((~B[(x + 1) % 5][y]) & B[(x + 2) % 5][y]); } }
+        A[0][0] ^= RC[round];
+    }
+    for (int x = 0; x < 5; x++) {
+        for (int y = 0; y < 5; y++) {
+            uint64_t v = A[x][y];
+            for (int z = 0; z < 8; z++) { s[(y * 5 + x) * 8 + z] = (uint8_t)((v >> (8 * z)) & 0xFF); }
+        }
+    }
+}
+
+typedef struct { uint8_t s[200]; size_t pos; } sha3_256_ctx;
+static void sha3_256_init(sha3_256_ctx *c) { memset(c, 0, sizeof(*c)); }
+static void sha3_256_update(sha3_256_ctx *c, const uint8_t *data, size_t len) {
+    while (len > 0) {
+        size_t n = 136 - c->pos; if (n > len) { n = len; }
+        for (size_t i = 0; i < n; i++) { c->s[c->pos + i] ^= data[i]; }
+        c->pos += n; data += n; len -= n;
+        if (c->pos == 136) { keccak_f1600(c->s); c->pos = 0; }
+    }
+}
+static void sha3_256_final(sha3_256_ctx *c, uint8_t out[32]) {
+    c->s[c->pos] ^= 0x06; c->s[136 - 1] ^= 0x80; keccak_f1600(c->s); memcpy(out, c->s, 32);
+}
+
+typedef struct { sha3_256_ctx inner; uint8_t opad_block[136]; } hmac_sha3_256_ctx;
+static void hmac_sha3_256_init(hmac_sha3_256_ctx *h, const uint8_t *key, size_t keylen) {
+    uint8_t kblk[136]; memset(kblk, 0, sizeof kblk);
+    if (keylen > 136) { sha3_256_ctx t; uint8_t dig[32]; sha3_256_init(&t); sha3_256_update(&t, key, keylen); sha3_256_final(&t, dig); memcpy(kblk, dig, 32); }
+    else { memcpy(kblk, key, keylen); }
+    uint8_t ipad[136]; uint8_t opad[136];
+    for (size_t i = 0; i < 136; i++) { ipad[i] = (uint8_t)(kblk[i] ^ 0x36); opad[i] = (uint8_t)(kblk[i] ^ 0x5c); }
+    sha3_256_init(&h->inner); sha3_256_update(&h->inner, ipad, 136); memcpy(h->opad_block, opad, 136);
+}
+static void hmac_sha3_256_update(hmac_sha3_256_ctx *h, const uint8_t *data, size_t len) { sha3_256_update(&h->inner, data, len); }
+static void hmac_sha3_256_final(hmac_sha3_256_ctx *h, uint8_t out[32]) { uint8_t inner_dig[32]; sha3_256_final(&h->inner, inner_dig); sha3_256_ctx outer; sha3_256_init(&outer); sha3_256_update(&outer, h->opad_block, 136); sha3_256_update(&outer, inner_dig, 32); sha3_256_final(&outer, out); }
 
 static int validate_path(const char *p) {
     if (!p) {
@@ -170,14 +246,15 @@ void L_reverse(uint8_t *in_out) {
 void gen_round_keys(uint8_t* key, chunk* round_keys) {
     int i;
 
-    uint8_t cs[32][KUZNECHIK_BLOCK_SIZE] = {};
+    uint8_t cs[32][KUZNECHIK_BLOCK_SIZE] = {0};
 
     for (i = 0; i < 32; i++) {
         cs[i][15] = i + 1;
         L(cs[i]);
     }
 
-    chunk ks[2] = {};
+    chunk ks[2] = {0};
+
     round_keys[0][0] = ks[0][0] = ((chunk*) key)[0][0];
     round_keys[0][1] = ks[0][1] = ((chunk*) key)[0][1];
     round_keys[1][0] = ks[1][0] = ((chunk*) key)[1][0];
@@ -299,7 +376,8 @@ static int enc_ctr(const char *key_path, const char *in_path, const char *out_pa
         return lk;
     }
 
-    chunk round_keys[10] = {};
+    chunk round_keys[10] = {0};
+
     gen_round_keys(key, round_keys);
 
     FILE *fi = fopen(in_path, "rb");
@@ -324,6 +402,19 @@ static int enc_ctr(const char *key_path, const char *in_path, const char *out_pa
         return ERR_WRITE_IV;
     }
 
+    uint8_t hkey[32];
+    {
+        sha3_256_ctx t;
+        sha3_256_init(&t);
+        uint8_t prefix = 0x01;
+        sha3_256_update(&t, &prefix, 1);
+        sha3_256_update(&t, key, 32);
+        sha3_256_final(&t, hkey);
+    }
+    hmac_sha3_256_ctx hmac;
+    hmac_sha3_256_init(&hmac, hkey, 32);
+    hmac_sha3_256_update(&hmac, iv, 16);
+
     uint8_t ctr[16];
     memcpy(ctr, iv, 16);
 
@@ -341,6 +432,7 @@ static int enc_ctr(const char *key_path, const char *in_path, const char *out_pa
                 incr128(ctr);
                 off += n;
             }
+            hmac_sha3_256_update(&hmac, inbuf, r);
             if (fwrite(inbuf, 1, r, fo) != r) {
                 fclose(fi);
                 fclose(fo);
@@ -348,6 +440,14 @@ static int enc_ctr(const char *key_path, const char *in_path, const char *out_pa
             }
         }
     } while (r > 0);
+
+    uint8_t tag[32];
+    hmac_sha3_256_final(&hmac, tag);
+    if (fwrite(tag, 1, 32, fo) != 32) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_WRITE_BODY;
+    }
 
     fclose(fi);
     fclose(fo);
@@ -373,6 +473,23 @@ static int dec_ctr(const char *key_path, const char *in_path, const char *out_pa
         return 3;
     }
 
+    if (fseek(fi, 0, SEEK_END) != 0) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_BAD_ARG;
+    }
+    long fsz = ftell(fi);
+    if (fsz < 0) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_BAD_ARG;
+    }
+    if (fseek(fi, 0, SEEK_SET) != 0) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_BAD_ARG;
+    }
+
     uint8_t iv[16];
     if (fread(iv, 1, 16, fi) != 16) {
         fclose(fi);
@@ -380,30 +497,72 @@ static int dec_ctr(const char *key_path, const char *in_path, const char *out_pa
         return ERR_READ_IV;
     }
 
+    if (fsz < 16 + 32) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_FILE_SMALL;
+    }
+    long remaining = fsz - 16 - 32;
+
+    uint8_t hkey[32];
+    {
+        sha3_256_ctx t;
+        sha3_256_init(&t);
+        uint8_t prefix = 0x01;
+        sha3_256_update(&t, &prefix, 1);
+        sha3_256_update(&t, key, 32);
+        sha3_256_final(&t, hkey);
+    }
+    hmac_sha3_256_ctx hmac;
+    hmac_sha3_256_init(&hmac, hkey, 32);
+    hmac_sha3_256_update(&hmac, iv, 16);
+
     uint8_t ctr[16];
     memcpy(ctr, iv, 16);
 
     uint8_t inbuf[65536];
     uint8_t keystream[16];
     size_t r;
-    do {
-        r = fread(inbuf, 1, sizeof inbuf, fi);
-        if (r > 0) {
-            size_t off = 0;
-            while (off < r) {
-                block_encrypt_bytes(round_keys, ctr, keystream);
-                size_t n = (r - off) >= 16 ? 16 : (r - off);
-                for (size_t i = 0; i < n; ++i) inbuf[off + i] ^= keystream[i];
-                incr128(ctr);
-                off += n;
-            }
-            if (fwrite(inbuf, 1, r, fo) != r) {
-                fclose(fi);
-                fclose(fo);
-                return ERR_WRITE_BODY;
-            }
+    while (remaining > 0) {
+        size_t to_read = sizeof inbuf;
+        if ((long)to_read > remaining) {
+            to_read = (size_t)remaining;
         }
-    } while (r > 0);
+        r = fread(inbuf, 1, to_read, fi);
+        if (r == 0) {
+            break;
+        }
+        hmac_sha3_256_update(&hmac, inbuf, r);
+        size_t off = 0;
+        while (off < r) {
+            block_encrypt_bytes(round_keys, ctr, keystream);
+            size_t n = (r - off) >= 16 ? 16 : (r - off);
+            for (size_t i = 0; i < n; ++i) inbuf[off + i] ^= keystream[i];
+            incr128(ctr);
+            off += n;
+        }
+        if (fwrite(inbuf, 1, r, fo) != r) {
+            fclose(fi);
+            fclose(fo);
+            return ERR_WRITE_BODY;
+        }
+        remaining -= (long)r;
+    }
+
+    uint8_t tag_file[32];
+    if (fread(tag_file, 1, 32, fi) != 32) {
+        fclose(fi);
+        fclose(fo);
+        return ERR_FILE_SMALL;
+    }
+    uint8_t tag_calc[32];
+    hmac_sha3_256_final(&hmac, tag_calc);
+    if (memcmp(tag_calc, tag_file, 32) != 0) {
+        fclose(fi);
+        fclose(fo);
+        remove(out_path);
+        return ERR_AUTH;
+    }
 
     fclose(fi);
     fclose(fo);
@@ -468,6 +627,8 @@ static void explain_err(int code)
         case ERR_WRITE_BODY: fprintf(stderr, "error: write failed\n"); break;
         case ERR_HEX_OPEN: fprintf(stderr, "error: cannot open file for hex dump\n"); break;
         case ERR_PATH_LEN: fprintf(stderr, "error: bad path length\n"); break;
+        case ERR_AUTH: fprintf(stderr, "error: authentication failed\n"); break;
+        case ERR_FILE_SMALL: fprintf(stderr, "error: input too small\n"); break;
         case ERR_BAD_ARG: fprintf(stderr, "error: bad arguments\n"); break;
         default: break;
     }
